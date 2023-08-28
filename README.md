@@ -33,7 +33,6 @@ This application is a combination of two docker containers, one for Python Flask
 
 - Make sure you have a IAM role preconfigured, follow setup here: https://docs.aws.amazon.com/eks/latest/userguide/service_IAM_role.html#create-service-role
 
-> IAM role needs permissions for `iam:CreateRole` & `iam:AttachRolePolicy`, in order to create recommended eksClusterRole and attach AmazonEKSClusterPolicy
 
   ```bash
   named_profile=atn-developer
@@ -51,10 +50,16 @@ This application is a combination of two docker containers, one for Python Flask
     --profile=$named_profile
   ```
 
+  > IAM role needs permissions for `iam:CreateRole` & `iam:AttachRolePolicy`, in order to create recommended eksClusterRole and attach AmazonEKSClusterPolicy
+
+
+#### Create EKS Cluster
+
 - To create your EKS cluster, you need your VPC's subnet information:
 
   ```bash
-  vpc_id=vpc-fb32be86 # FROM YOUR AWS CONSOLE
+  # FROM YOUR AWS CONSOLE
+  vpc_id=vpc-fb32be86 
 
   # get three subnets
   vpc_id_vals=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc_id" --query "Subnets[*].SubnetId" --profile=$named_profile --output=json | jq -r '.[3:5]')
@@ -74,7 +79,11 @@ This application is a combination of two docker containers, one for Python Flask
     --role-arn arn:aws:iam::579747246975:role/$eks_iam_role \
     --resources-vpc-config subnetIds=$vpc_id_vals,securityGroupIds=sg-88780d8a \
     --profile=$named_profile
+
+  while [[ $(aws eks describe-cluster --name $your_cluster_name --profile=$named_profile | jq -r '.cluster.status') == "CREATING" ]]; do echo "waiting for cluster creation to complete..."; sleep 5; done
   ```
+
+#### Update local kubectl for deployment
 
 - Update local kubeconfig for newly creates eks cluster
 
@@ -90,28 +99,31 @@ This application is a combination of two docker containers, one for Python Flask
   kubectl get svc
   ```
 
+#### Create compute (nodegroup on ec2)
+
 - Create a Node Group to associated with your EKS cluster:
 
-```bash
-your_nodegroup_name=my-node-group-demo
-eks_node_role=AmazonEKSNodeRole
-min_size=1
-desired_size=1
-max_size=2
-instance_types=t2.medium
-disk_size=5
+  ```bash
+  your_nodegroup_name=my-node-group-demo
+  eks_node_role=AmazonEKSNodeRole
+  min_size=1
+  desired_size=1
+  max_size=2
+  instance_types=t2.medium
+  disk_size=5
 
-aws eks create-nodegroup \
-  --cluster-name $your_cluster_name \
-  --nodegroup-name $your_nodegroup_name \
-  --node-role arn:aws:iam::579747246975:role/$eks_node_role \
-  --subnets $vpc_id_vals \
-  --scaling-config minSize=$min_size,maxSize=$max_size,desiredSize=$desired_size \
-  --instance-types $instance_types \
-  --disk-size $disk_size \
-  --profile=$named_profile
-```
+  aws eks create-nodegroup \
+    --cluster-name $your_cluster_name \
+    --nodegroup-name $your_nodegroup_name \
+    --node-role arn:aws:iam::579747246975:role/$eks_node_role \
+    --subnets $vpc_id_vals \
+    --scaling-config minSize=$min_size,maxSize=$max_size,desiredSize=$desired_size \
+    --instance-types $instance_types \
+    --disk-size $disk_size \
+    --profile=$named_profile
+  ```
 
+#### Apply cluster manifest to eks
 - Excellent, go ahead and apply your manifests to your cluster
 
   ```bash
@@ -136,6 +148,8 @@ aws eks create-nodegroup \
   kubectl -n eks-sample-app describe pod eks-sample-linux-deployment-...
   ```
 
+#### Connect to container via shell
+
 - from there you can connect to the containers shell:
 
   ```bash
@@ -144,25 +158,55 @@ aws eks create-nodegroup \
 
 - how to make it publicly accessible over port 80? good question maybe for another time...
 
+#### Terminate environment (computer & cluster)
 
 - destroy the node group, and cluster
 
-```bash
-aws eks delete-nodegroup --cluster-name $your_cluster_name --nodegroup-name $your_nodegroup_name --profile=$named_profile
-```
+  ```bash
+  aws eks delete-nodegroup --cluster-name $your_cluster_name --nodegroup-name $your_nodegroup_name --profile=$named_profile
+  ```
 
 - wait for the node group to delete, then delete the cluster
 
 
-```bash
-while [[ $(aws eks describe-nodegroup --cluster-name $your_cluster_name --nodegroup-name $your_nodegroup_name --profile=$named_profile | jq -r '.nodegroup.status') == "DELETING" ]]; do echo "waiting for nodegroup to delete..."; sleep 5; done
+  ```bash
+  while [[ $(aws eks describe-nodegroup --cluster-name $your_cluster_name --nodegroup-name $your_nodegroup_name --profile=$named_profile | jq -r '.nodegroup.status') == "DELETING" ]]; do echo "waiting for nodegroup to delete..."; sleep 5; done
 
-aws eks delete-cluster --name $your_cluster_name --profile=$named_profile
-```
+  aws eks delete-cluster --name $your_cluster_name --profile=$named_profile
+  ```
 
+#### Push container to ECR
 
+- create an ecr registry:
 
+  ```bash
+  aws ecr create-repository --repository-name flask-app --profile=$named_profile
+  ```
 
+- build local container
 
+  ```bash
+  cd flask_demo/service
+  docker build -t flask-app:latest .
+  ```
 
+- push container to ecr
 
+  ```bash
+  docker push 579747246975.dkr.ecr.us-east-1.amazonaws.com/flask-app:latest
+  ```
+
+- update manifest to include endpoint for ecr
+
+  ```diff
+  - image: flask-app:latest
+  + image: 579747246975.dkr.ecr.us-east-1.amazonaws.com/flask-app:latest
+  ```
+
+- apply the manifest
+
+  ```bash
+  kubectl apply -f app-deployment.yaml
+  ```
+
+- all of the above hasn't been tested for ecr! but it should work 🤞 (it was AI assisted after all)
